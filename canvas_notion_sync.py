@@ -322,8 +322,15 @@ class CanvasNotionSync:
             return 0
 
 def main():
+    import sys
+    
     # Initialize the sync class
     sync = CanvasNotionSync()
+    
+    # Check if user wants to list courses
+    if len(sys.argv) > 1 and sys.argv[1] == '--list-courses':
+        sync.list_available_courses()
+        return
     
     # Validate environment variables
     required_vars = ['CANVAS_API_URL', 'CANVAS_TOKEN', 'NOTION_TOKEN', 'NOTION_DATABASE_ID']
@@ -336,7 +343,28 @@ def main():
         print("2. CANVAS_TOKEN (from Canvas Account Settings)")
         print("3. NOTION_TOKEN (from Notion integrations)")
         print("4. NOTION_DATABASE_ID (from your Notion database URL)")
+        print("\nOptional filtering variables:")
+        print("5. CANVAS_COURSE_IDS (comma-separated course IDs)")
+        print("6. CANVAS_COURSE_CODES (comma-separated course codes)")
+        print("7. CANVAS_COURSE_NAMES (comma-separated course names)")
+        print("8. EXCLUDE_COMPLETED_COURSES (true/false, default: true)")
         return
+    
+    # Show current filter settings
+    if sync.course_ids or sync.course_codes or sync.course_names:
+        print("🎯 Course Filtering Active:")
+        if sync.course_ids:
+            print(f"  📋 Course IDs: {', '.join(sync.course_ids)}")
+        if sync.course_codes:
+            print(f"  🏷️  Course Codes: {', '.join(sync.course_codes)}")
+        if sync.course_names:
+            print(f"  📚 Course Names: {', '.join(sync.course_names)}")
+        print(f"  🚫 Exclude Completed: {sync.exclude_completed}")
+        print()
+    else:
+        print("📚 Syncing ALL courses (no filters applied)")
+        print("💡 Use --list-courses to see available courses")
+        print()
     
     # Run the sync
     sync.sync_assignments()
