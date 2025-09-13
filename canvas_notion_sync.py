@@ -2,7 +2,7 @@ import requests
 import json
 from datetime import datetime, timezone
 import os
-from typing import List, Dict, Optional 
+from typing import List, Dict, Optional
 import time
 
 class CanvasNotionSync:
@@ -40,6 +40,25 @@ class CanvasNotionSync:
         except requests.exceptions.RequestException as e:
             print(f"Error fetching courses: {e}")
             return []
+    
+    def list_available_courses(self):
+        """List all available courses for easy identification"""
+        print("🔍 Listing all available courses:")
+        courses = self.get_canvas_courses()
+        
+        print(f"\n{'ID':<10} {'Code':<15} {'State':<12} {'Name'}")
+        print("-" * 80)
+        
+        for course in courses:
+            course_id = course['id']
+            course_code = course.get('course_code', 'N/A')
+            course_name = course.get('name', 'N/A')
+            state = course.get('workflow_state', 'N/A')
+            
+            print(f"{course_id:<10} {course_code:<15} {state:<12} {course_name}")
+        
+        print(f"\n📊 Total courses found: {len(courses)}")
+        return courses
     
     def get_canvas_assignments(self, course_id: str) -> List[Dict]:
         """Fetch assignments for a specific course"""
