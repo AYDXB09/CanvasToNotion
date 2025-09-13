@@ -2,7 +2,7 @@ import requests
 import json
 from datetime import datetime, timezone
 import os
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional 
 import time
 
 class CanvasNotionSync:
