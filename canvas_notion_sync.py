@@ -13,6 +13,12 @@ class CanvasNotionSync:
         self.notion_token = os.getenv('NOTION_TOKEN')
         self.notion_database_id = os.getenv('NOTION_DATABASE_ID')
         
+        # Course filtering options
+        self.course_ids = self.parse_course_list(os.getenv('CANVAS_COURSE_IDS', ''))
+        self.course_codes = self.parse_course_list(os.getenv('CANVAS_COURSE_CODES', ''))
+        self.course_names = self.parse_course_list(os.getenv('CANVAS_COURSE_NAMES', ''))
+        self.exclude_completed = os.getenv('EXCLUDE_COMPLETED_COURSES', 'true').lower() == 'true'
+        
         # Headers for API requests
         self.canvas_headers = {
             'Authorization': f'Bearer {self.canvas_token}',
@@ -24,6 +30,12 @@ class CanvasNotionSync:
             'Content-Type': 'application/json',
             'Notion-Version': '2022-06-28'
         }
+    
+    def parse_course_list(self, course_string: str) -> List[str]:
+        """Parse comma-separated course list from environment variable"""
+        if not course_string:
+            return []
+        return [item.strip() for item in course_string.split(',') if item.strip()]
     
     def get_canvas_courses(self) -> List[Dict]:
         """Fetch all courses from Canvas"""
@@ -40,6 +52,33 @@ class CanvasNotionSync:
         except requests.exceptions.RequestException as e:
             print(f"Error fetching courses: {e}")
             return []
+    
+    def should_include_course(self, course: Dict) -> bool:
+        """Determine if a course should be included based on filters"""
+        course_id = str(course['id'])
+        course_code = course.get('course_code', '')
+        course_name = course.get('name', '')
+        workflow_state = course.get('workflow_state', '')
+        
+        # Exclude completed courses if specified
+        if self.exclude_completed and workflow_state == 'completed':
+            return False
+        
+        # If no filters are specified, include all courses
+        if not (self.course_ids or self.course_codes or self.course_names):
+            return True
+        
+        # Check if course matches any of the specified filters
+        if self.course_ids and course_id in self.course_ids:
+            return True
+        
+        if self.course_codes and any(code.lower() in course_code.lower() for code in self.course_codes):
+            return True
+            
+        if self.course_names and any(name.lower() in course_name.lower() for name in self.course_names):
+            return True
+        
+        return False
     
     def list_available_courses(self):
         """List all available courses for easy identification"""
@@ -263,13 +302,28 @@ class CanvasNotionSync:
         
         # Get all courses
         courses = self.get_canvas_courses()
-        print(f"📚 Found {len(courses)} active courses")
+        
+        # Filter courses based on specified criteria
+        filtered_courses = [course for course in courses if self.should_include_course(course)]
+        
+        print(f"📚 Found {len(courses)} total courses")
+        print(f"🎯 Filtering to {len(filtered_courses)} courses based on your criteria")
+        
+        if filtered_courses != courses:
+            print("\n📋 Courses being synced:")
+            for course in filtered_courses:
+                print(f"  • {course.get('course_code', 'N/A')} - {course['name']}")
+        
+        if not filtered_courses:
+            print("⚠️ No courses match your filtering criteria!")
+            print("💡 Run with --list-courses to see all available courses")
+            return
         
         total_assignments = 0
         new_assignments = 0
         updated_assignments = 0
         
-        for course in courses:
+        for course in filtered_courses:
             course_id = course['id']
             course_name = course['name']
             print(f"\n📖 Processing course: {course_name}")
