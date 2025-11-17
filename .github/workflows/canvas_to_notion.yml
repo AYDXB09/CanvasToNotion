@@ -20,7 +20,7 @@ jobs:
       # Notion
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
       # Same parent page ID you used in n8n
-      NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+      NOTION_PARENT_PAGE_ID: ${{ vars.NOTION_PARENT_PAGE_ID }}
 
     steps:
       - name: Check out repository
