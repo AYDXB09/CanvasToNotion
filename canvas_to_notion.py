@@ -58,35 +58,25 @@ def require_env(name, value):
 # ==========================================================
 
 def get_latest_db_id():
-    """
-    n8n: "Get DB in Page" + "Get DB Number"
-
-    GET /v1/blocks/{parent_page_id}/children
-    Find the child_database whose title is NOTION_DB_TITLE.
-    """
-    require_env("NOTION_PARENT_PAGE_ID", NOTION_PARENT_PAGE_ID)
+    """Find the latest Canvas Course - Track Assignments DB under the parent page."""
 
     url = f"https://api.notion.com/v1/blocks/{NOTION_PARENT_PAGE_ID}/children?page_size=100"
-    resp = requests.get(url, headers=notion_headers())
+    headers = notion_headers()
+
+    resp = requests.get(url, headers=headers)
     resp.raise_for_status()
-    data = resp.json()
 
-    results = data.get("results", [])
-    for block in results:
-        if block.get("type") != "child_database":
-            continue
+    results = resp.json().get("results", [])
 
-        child_db = block.get("child_database", {})
-        title = child_db.get("title")
-        archived = block.get("archived", False)
+    TARGET_TITLE = "Canvas Course - Track Assignments"  # EXACT title from n8n
 
-        if title == NOTION_DB_TITLE and not archived:
-            # In Notion, child_database.id is the database ID.
-            return child_db["id"]
+    for child in results:
+        if child.get("type") == "child_database":
+            db_title = child["child_database"]["title"]
+            if db_title == TARGET_TITLE:
+                return child["id"]
 
-    raise RuntimeError(
-        f"No active child database titled '{NOTION_DB_TITLE}' found under parent page."
-    )
+    raise Exception(f"❌ No database found under parent page with title: {TARGET_TITLE}")
 
 
 def get_db_schema(database_id):
