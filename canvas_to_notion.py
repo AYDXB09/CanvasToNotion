@@ -19,13 +19,21 @@ CANVAS_COURSE_IDS = {
 
 NOTION_API_KEY = os.environ.get("NOTION_API_KEY")
 NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_PARENT_PAGE_ID")  # same parent page as n8n
+NOTION_DATABASE_NAME = os.environ.get("NOTION_DATABASE_NAME", "Canvas Course - Track Assignments")
 
 NOTION_VERSION = "2022-06-28"
-NOTION_DB_TITLE = "Canvas Course - Track Assignments"
+NOTION_DB_TITLE = NOTION_DATABASE_NAME
+
+# Due-date filters (repository variables)
+DUE_DATE_PERIOD_START = os.environ.get("DUE_DATE_PERIOD_START", "").strip()  # "YYYY-MM-DD" or ""
+DUE_DATE_PERIOD_END = os.environ.get("DUE_DATE_PERIOD_END", "").strip()      # "YYYY-MM-DD" or ""
+INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE = (
+    os.environ.get("INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE", "false").lower() == "true"
+)
 
 
 # ==============================
-# HELPERS
+# HELPER FUNCTIONS
 # ==============================
 def get_notion_headers():
     return {
@@ -49,9 +57,71 @@ def ensure_env():
 
     print("✅ Environment variables loaded.")
     if CANVAS_COURSE_IDS:
-        print(f"✅ Using course filter: {sorted(CANVAS_COURSE_IDS)}")
+        print(f"✅ Using course filter (CANVAS_COURSE_IDS): {sorted(CANVAS_COURSE_IDS)}")
     else:
         print("✅ No course filter set. Will include ALL active Canvas courses.")
+
+    print(f"✅ INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE = {INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE}")
+    if DUE_DATE_PERIOD_START:
+        print(f"✅ DUE_DATE_PERIOD_START = {DUE_DATE_PERIOD_START}")
+    if DUE_DATE_PERIOD_END:
+        print(f"✅ DUE_DATE_PERIOD_END   = {DUE_DATE_PERIOD_END}")
+
+
+def parse_canvas_datetime(value: str):
+    """Parse Canvas ISO datetime (with 'Z') into timezone-aware UTC datetime."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def parse_filter_date(value: str):
+    """Parse YYYY-MM-DD into a timezone-aware UTC datetime at midnight."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+# Pre-compute filter datetimes
+DUE_DATE_START_DT = parse_filter_date(DUE_DATE_PERIOD_START)
+DUE_DATE_END_DT = parse_filter_date(DUE_DATE_PERIOD_END)
+
+
+def assignment_passes_due_date_filter(assignment: dict) -> bool:
+    """
+    Apply the rules you requested:
+
+    1) If both start & end set → include if start <= due <= end
+    2) If only end set → include if due <= end
+    3) If only start set → include if due >= start
+    4) If neither set → don't filter by date at all
+    5) If no due_at:
+         - include only if INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE == True
+    """
+    due = parse_canvas_datetime(assignment.get("due_at"))
+
+    # No due_at
+    if due is None:
+        return INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE
+
+    # Now due is timezone-aware
+    if DUE_DATE_START_DT and DUE_DATE_END_DT:
+        return DUE_DATE_START_DT <= due <= DUE_DATE_END_DT
+
+    if DUE_DATE_END_DT and not DUE_DATE_START_DT:
+        return due <= DUE_DATE_END_DT
+
+    if DUE_DATE_START_DT and not DUE_DATE_END_DT:
+        return due >= DUE_DATE_START_DT
+
+    # No filters set → include everything
+    return True
 
 
 # ==============================
@@ -59,16 +129,13 @@ def ensure_env():
 # ==============================
 def get_canvas_courses():
     """
-    If CANVAS_COURSE_IDS is non-empty:
-        - Fetch only those courses by ID (to be safe, we still call /courses?include[]=term etc
-          and filter locally by ID).
-    Else:
-        - Fetch ALL active courses for the student (n8n-style logic).
+    n8n-style:
+
+    /api/v1/courses?enrollment_type=student&enrollment_state=active&state[]=available
+
+    Then filter locally by CANVAS_COURSE_IDS (if provided).
     """
     headers = {"Authorization": f"Bearer {CANVAS_API_TOKEN}"}
-
-    # Base URL matches your n8n flow:
-    #   /api/v1/courses?enrollment_type=student&enrollment_state=active&state[]=available
     url = (
         f"{CANVAS_BASE_URL}/api/v1/courses"
         "?enrollment_type=student"
@@ -85,13 +152,15 @@ def get_canvas_courses():
     # Filter by CANVAS_COURSE_IDS if specified
     if CANVAS_COURSE_IDS:
         filtered = [c for c in courses if str(c.get("id")) in CANVAS_COURSE_IDS]
-        print(f"📘 Canvas returned {len(courses)} active courses; "
-              f"filtering down to {len(filtered)} by CANVAS_COURSE_IDS.")
+        print(
+            f"📘 Canvas returned {len(courses)} active courses; "
+            f"filtering down to {len(filtered)} by CANVAS_COURSE_IDS."
+        )
         courses = filtered
     else:
         print(f"📘 Canvas returned {len(courses)} active courses (no ID filter).")
 
-    # Build a mapping of course_id -> (short_name, full_name)
+    # Map course_id -> {short_name, full_name}
     course_map = {}
     for c in courses:
         cid = str(c.get("id"))
@@ -105,7 +174,7 @@ def get_canvas_courses():
     return course_map
 
 
-def get_canvas_assignments_for_course(course_id):
+def get_canvas_assignments_for_course(course_id: str):
     headers = {"Authorization": f"Bearer {CANVAS_API_TOKEN}"}
     url = f"{CANVAS_BASE_URL}/api/v1/courses/{course_id}/assignments?per_page=100"
 
@@ -115,27 +184,51 @@ def get_canvas_assignments_for_course(course_id):
     return resp.json()
 
 
-def get_all_assignments(course_map):
+def get_canvas_submission(course_id: str, assignment_id: int):
     """
-    Return list of (course_id, assignment_dict).
+    Get submission for the *current user*, like n8n did,
+    so we can fill Score + Submitted Date.
+    """
+    headers = {"Authorization": f"Bearer {CANVAS_API_TOKEN}"}
+    url = (
+        f"{CANVAS_BASE_URL}/api/v1/courses/{course_id}"
+        f"/assignments/{assignment_id}/submissions/self"
+    )
+    resp = requests.get(url, headers=headers)
+
+    if resp.status_code == 404:
+        # No submission yet
+        return None
+
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_all_filtered_assignments(course_map):
+    """
+    Return list of (course_id, assignment_dict) AFTER applying due-date filter.
     """
     all_items = []
     for cid in course_map.keys():
         assignments = get_canvas_assignments_for_course(cid)
-        print(f"   📄 {len(assignments)} assignments in course {cid}.")
+        print(f"   📄 {len(assignments)} assignments in course {cid} (before filtering).")
+
         for a in assignments:
-            all_items.append((cid, a))
-    print(f"📚 Total assignments collected: {len(all_items)}")
+            if assignment_passes_due_date_filter(a):
+                all_items.append((cid, a))
+
+    print(f"📚 Total assignments AFTER due-date filter: {len(all_items)}")
     return all_items
 
 
 # ==============================
-# NOTION – DATABASE CREATION
+# NOTION – DATABASE (LEGACY SCHEMA)
 # ==============================
 def archive_existing_database():
     """
-    Find any child_database under NOTION_PARENT_PAGE_ID with title == NOTION_DB_TITLE
-    and archive them (n8n: Archive-if-Exists).
+    Find any child_database under NOTION_PARENT_PAGE_ID
+    with title == NOTION_DB_TITLE and archive them.
+    (n8n: Archive-if-Exists)
     """
     headers = get_notion_headers()
     url = f"https://api.notion.com/v1/blocks/{NOTION_PARENT_PAGE_ID}/children?page_size=100"
@@ -177,43 +270,47 @@ def archive_existing_database():
 
 def build_db_properties_schema():
     """
-    Fixed, simple schema (Option A). This matches the core columns you had:
-      - Assignment Name (Title)
-      - Course (short ID/code)
-      - Course Name (full)
-      - Due Date
-      - Status (Pending / Completed)
-      - Canvas URL
-      - Canvas ID
-      - Max Points
-      - Submitted
-      - Synced On
+    ✅ LEGACY SCHEMA (your original):
+      - Name (Title)
+      - Assignment Updated Date (Date)
+      - Class (Rich text)
+      - Description (Rich text)
+      - Due Date (Date)
+      - ID (Rich text)
+      - Link (URL)
+      - Points (Number)
+      - Score (Number)
+      - Status (Select)
+      - Submitted Date (Date)
     """
     return {
-        "Assignment Name": {"title": {}},
-        "Course": {"rich_text": {}},
-        "Course Name": {"rich_text": {}},
+        "Name": {"title": {}},
+        "Assignment Updated Date": {"date": {}},
+        "Class": {"rich_text": {}},
+        "Description": {"rich_text": {}},
         "Due Date": {"date": {}},
+        "ID": {"rich_text": {}},
+        "Link": {"url": {}},
+        "Points": {"number": {}},
+        "Score": {"number": {}},
         "Status": {
             "select": {
                 "options": [
-                    {"name": "Pending", "color": "yellow"},
+                    {"name": "Overdue", "color": "yellow"},
+                    {"name": "In Progress", "color": "orange"},
                     {"name": "Completed", "color": "green"},
+                    {"name": "Not Started", "color": "blue"},
                 ]
             }
         },
-        "Canvas URL": {"url": {}},
-        "Canvas ID": {"rich_text": {}},
-        "Max Points": {"number": {"format": "number"}},
-        "Submitted": {"checkbox": {}},
-        "Synced On": {"date": {}},
+        "Submitted Date": {"date": {}},
     }
 
 
 def create_new_database():
     """
-    Create a new database under NOTION_PARENT_PAGE_ID with fixed schema
-    and title 'Canvas Course - Track Assignments'.
+    Create a new database under NOTION_PARENT_PAGE_ID with the legacy schema
+    and title NOTION_DB_TITLE.
     """
     headers = get_notion_headers()
     url = "https://api.notion.com/v1/databases"
@@ -232,7 +329,7 @@ def create_new_database():
         "properties": build_db_properties_schema(),
     }
 
-    print("🆕 Creating new Notion database…")
+    print("🆕 Creating new Notion database (legacy schema)…")
     resp = requests.post(url, headers=headers, data=json.dumps(body))
     resp.raise_for_status()
     db = resp.json()
@@ -244,75 +341,114 @@ def create_new_database():
 # ==============================
 # NOTION – PAGE CREATION
 # ==============================
-def create_assignment_page(db_id, course_info, assignment):
+def create_assignment_page(db_id, course_info, assignment, submission):
+    """
+    Create one page in the legacy schema,
+    including improved score + submission data (Option B).
+    """
     headers = get_notion_headers()
 
     assignment_name = assignment.get("name") or "Untitled Assignment"
     canvas_url = assignment.get("html_url")
     canvas_id = str(assignment.get("id"))
-    due_at = assignment.get("due_at")
-    points = assignment.get("points_possible")
-    has_submitted = assignment.get("has_submitted_submissions", False)
 
-    # Convert due_at ISO -> date
-    due_date_prop = None
-    if due_at:
-        try:
-            dt = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
-            due_date_prop = dt.date().isoformat()
-        except Exception:
-            pass
+    # Legacy fields
+    updated_at = parse_canvas_datetime(assignment.get("updated_at"))
+    due_at = parse_canvas_datetime(assignment.get("due_at"))
 
-    now = datetime.now(timezone.utc).date().isoformat()
+    # Points possible
+    points_possible = assignment.get("points_possible")
 
-    properties = {
-        "Assignment Name": {
+    # Submission info (Option B)
+    score = None
+    submitted_at = None
+    has_submitted = False
+
+    if submission:
+        score = submission.get("score")
+        submitted_at = parse_canvas_datetime(submission.get("submitted_at"))
+        # Canvas submissions have workflow_state: "submitted", "graded", etc.
+        # If there is a submission record at all, treat as submitted.
+        has_submitted = True
+
+    # Status logic (simple, like n8n style)
+    now = datetime.now(timezone.utc)
+    if has_submitted:
+        status_name = "Completed"
+    elif due_at and due_at < now:
+        status_name = "Overdue"
+    else:
+        status_name = "Not Started"
+
+    # Build Notion properties (omit properties instead of sending nulls)
+    props = {
+        "Name": {
             "title": [
                 {"text": {"content": assignment_name}}
             ]
         },
-        "Course": {
+        "Class": {
             "rich_text": [
                 {"text": {"content": course_info["short_name"]}}
             ]
         },
-        "Course Name": {
-            "rich_text": [
-                {"text": {"content": course_info["full_name"]}}
-            ]
-        },
-        "Status": {
-            "select": {"name": "Pending"}
-        },
-        "Canvas URL": {
-            "url": canvas_url,
-        },
-        "Canvas ID": {
+        "ID": {
             "rich_text": [
                 {"text": {"content": canvas_id}}
             ]
         },
-        "Submitted": {
-            "checkbox": bool(has_submitted),
+        "Link": {
+            "url": canvas_url,
         },
-        "Synced On": {
-            "date": {"start": now},
+        "Status": {
+            "select": {"name": status_name}
         },
     }
 
-    if points is not None:
-        properties["Max Points"] = {
-            "number": float(points),
+    # Optional: Assignment Updated Date
+    if updated_at:
+        props["Assignment Updated Date"] = {
+            "date": {"start": updated_at.isoformat()}
         }
 
-    if due_date_prop:
-        properties["Due Date"] = {
-            "date": {"start": due_date_prop}
+    # Optional: Description
+    desc = assignment.get("description")
+    if desc:
+        props["Description"] = {
+            "rich_text": [
+                {"text": {"content": desc[:1900]}}  # avoid super-long property
+            ]
+        }
+
+    # Optional: Due Date
+    if due_at:
+        props["Due Date"] = {
+            "date": {"start": due_at.date().isoformat()}
+        }
+
+    # Optional: Points
+    if points_possible is not None:
+        try:
+            props["Points"] = {"number": float(points_possible)}
+        except Exception:
+            pass
+
+    # Optional: Score
+    if score is not None:
+        try:
+            props["Score"] = {"number": float(score)}
+        except Exception:
+            pass
+
+    # Optional: Submitted Date
+    if submitted_at:
+        props["Submitted Date"] = {
+            "date": {"start": submitted_at.isoformat()}
         }
 
     body = {
         "parent": {"database_id": db_id},
-        "properties": properties,
+        "properties": props,
     }
 
     url = "https://api.notion.com/v1/pages"
@@ -323,12 +459,14 @@ def create_assignment_page(db_id, course_info, assignment):
 def sync_assignments_to_notion(db_id, course_map, assignments):
     print("📝 Creating pages in Notion…")
     count = 0
+
     for cid, assignment in assignments:
         course_info = course_map.get(cid)
         if not course_info:
-            # Should not happen, but be safe
             continue
-        create_assignment_page(db_id, course_info, assignment)
+
+        submission = get_canvas_submission(cid, assignment.get("id"))
+        create_assignment_page(db_id, course_info, assignment, submission)
         count += 1
 
     print(f"✅ Created {count} assignment pages in Notion.")
@@ -346,17 +484,17 @@ def main():
         print("⚠️ No courses found (after filtering). Nothing to sync.")
         return
 
-    # 2) Canvas: get all assignments for those courses
-    assignments = get_all_assignments(course_map)
+    # 2) Canvas: get assignments, THEN apply due-date filter
+    assignments = get_all_filtered_assignments(course_map)
     if not assignments:
-        print("⚠️ No assignments found. Nothing to sync.")
+        print("⚠️ No assignments passed the due-date filter. Nothing to sync.")
         return
 
     # 3) Notion: archive old DB (same name) and create new DB under same parent page
     archive_existing_database()
     new_db_id = create_new_database()
 
-    # 4) Notion: create pages for all assignments
+    # 4) Notion: create pages for all filtered assignments
     sync_assignments_to_notion(new_db_id, course_map, assignments)
 
     print("🎉 Canvas → Notion sync completed.")
