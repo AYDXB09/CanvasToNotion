@@ -1,38 +1,47 @@
-name: Canvas → Notion (Assignments Sync)
+name: Canvas → Notion (Assignments Sync – due-date filter)
 
 on:
   schedule:
-    - cron: "0 14 * * 1"   # Monday 6PM Dubai time (UTC+4)
+    # Every Monday 14:00 UTC = 6:00 PM Dubai (UTC+4)
+    - cron: "0 14 * * 1"
   workflow_dispatch:
 
 jobs:
-  sync:
+  canvas-to-notion:
     runs-on: ubuntu-latest
 
     env:
+      # Canvas
       CANVAS_BASE_URL: https://dwight.instructure.com
       CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
       CANVAS_COURSE_IDS: ${{ vars.CANVAS_COURSE_IDS }}
 
+      # Notion
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
       NOTION_PARENT_PAGE_ID: ${{ vars.NOTION_PARENT_PAGE_ID }}
+      # Optional override; otherwise Python defaults to
+      # "Canvas Course - Track Assignments"
+      NOTION_DATABASE_NAME: ${{ vars.NOTION_DB_TITLE }}
 
+      # Due-date filtering (branch feature)
       DUE_DATE_PERIOD_START: ${{ vars.DUE_DATE_PERIOD_START }}
       DUE_DATE_PERIOD_END: ${{ vars.DUE_DATE_PERIOD_END }}
       INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE: ${{ vars.INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE }}
 
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4
+          python -m pip install --upgrade pip
+          pip install requests
 
-      - name: Run sync
-        run: python canvas_to_notion.py
+      - name: Run Canvas → Notion sync
+        run: |
+          python canvas_to_notion.py
