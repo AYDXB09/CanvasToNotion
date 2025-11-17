@@ -1,393 +1,365 @@
 import os
 import json
-from datetime import datetime, timedelta, timezone
-
 import requests
+from datetime import datetime, timezone
 
-# ==========================================================
-# CONFIG (matches your n8n flow as closely as possible)
-# ==========================================================
-
+# ==============================
+# CONFIG
+# ==============================
 CANVAS_BASE_URL = os.environ.get("CANVAS_BASE_URL", "https://dwight.instructure.com")
 CANVAS_API_TOKEN = os.environ.get("CANVAS_API_TOKEN")
 
-# Optional filter: comma-separated course IDs: "7229,7243"
+# Comma–separated list of course IDs: "7229,7243"
 CANVAS_COURSE_IDS_RAW = os.environ.get("CANVAS_COURSE_IDS", "").strip()
-CANVAS_COURSE_IDS = [
-    c.strip() for c in CANVAS_COURSE_IDS_RAW.split(",") if c.strip()
-]
+CANVAS_COURSE_IDS = {
+    c.strip()
+    for c in CANVAS_COURSE_IDS_RAW.split(",")
+    if c.strip()
+}
 
 NOTION_API_KEY = os.environ.get("NOTION_API_KEY")
-NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_PARENT_PAGE_ID")
-NOTION_DB_TITLE = os.environ.get(
-    "NOTION_DB_TITLE", "Canvas Course - Track Assignments"
-)
+NOTION_PARENT_PAGE_ID = os.environ.get("NOTION_PARENT_PAGE_ID")  # same parent page as n8n
 
 NOTION_VERSION = "2022-06-28"
+NOTION_DB_TITLE = "Canvas Course - Track Assignments"
 
 
-# ----------------------------------------------------------
-# Helpers
-# ----------------------------------------------------------
-
-def notion_headers(extra=None):
-    headers = {
+# ==============================
+# HELPERS
+# ==============================
+def get_notion_headers():
+    return {
         "Authorization": f"Bearer {NOTION_API_KEY}",
         "Notion-Version": NOTION_VERSION,
         "Content-Type": "application/json",
     }
-    if extra:
-        headers.update(extra)
-    return headers
 
 
-def canvas_headers():
-    return {
-        "Authorization": f"Bearer {CANVAS_API_TOKEN}",
-    }
+def ensure_env():
+    missing = []
+    if not CANVAS_API_TOKEN:
+        missing.append("CANVAS_API_TOKEN")
+    if not NOTION_API_KEY:
+        missing.append("NOTION_API_KEY")
+    if not NOTION_PARENT_PAGE_ID:
+        missing.append("NOTION_PARENT_PAGE_ID")
+
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+
+    print("✅ Environment variables loaded.")
+    if CANVAS_COURSE_IDS:
+        print(f"✅ Using course filter: {sorted(CANVAS_COURSE_IDS)}")
+    else:
+        print("✅ No course filter set. Will include ALL active Canvas courses.")
 
 
-def require_env(name, value):
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
+# ==============================
+# CANVAS LOGIC
+# ==============================
+def get_canvas_courses():
+    """
+    If CANVAS_COURSE_IDS is non-empty:
+        - Fetch only those courses by ID (to be safe, we still call /courses?include[]=term etc
+          and filter locally by ID).
+    Else:
+        - Fetch ALL active courses for the student (n8n-style logic).
+    """
+    headers = {"Authorization": f"Bearer {CANVAS_API_TOKEN}"}
 
+    # Base URL matches your n8n flow:
+    #   /api/v1/courses?enrollment_type=student&enrollment_state=active&state[]=available
+    url = (
+        f"{CANVAS_BASE_URL}/api/v1/courses"
+        "?enrollment_type=student"
+        "&enrollment_state=active"
+        "&state[]=available"
+        "&per_page=100"
+    )
 
-# ==========================================================
-# NOTION – DB lifecycle (mirror n8n)
-# ==========================================================
-
-def get_latest_db_id():
-    """Find the latest Canvas Course - Track Assignments DB under the parent page."""
-
-    url = f"https://api.notion.com/v1/blocks/{NOTION_PARENT_PAGE_ID}/children?page_size=100"
-    headers = notion_headers()
-
+    print("📡 Fetching Canvas courses…")
     resp = requests.get(url, headers=headers)
     resp.raise_for_status()
+    courses = resp.json()
 
-    results = resp.json().get("results", [])
+    # Filter by CANVAS_COURSE_IDS if specified
+    if CANVAS_COURSE_IDS:
+        filtered = [c for c in courses if str(c.get("id")) in CANVAS_COURSE_IDS]
+        print(f"📘 Canvas returned {len(courses)} active courses; "
+              f"filtering down to {len(filtered)} by CANVAS_COURSE_IDS.")
+        courses = filtered
+    else:
+        print(f"📘 Canvas returned {len(courses)} active courses (no ID filter).")
 
-    TARGET_TITLE = "Canvas Course - Track Assignments"  # EXACT title from n8n
+    # Build a mapping of course_id -> (short_name, full_name)
+    course_map = {}
+    for c in courses:
+        cid = str(c.get("id"))
+        short_name = c.get("course_code") or c.get("name") or f"Course {cid}"
+        full_name = c.get("name") or short_name
+        course_map[cid] = {
+            "short_name": short_name,
+            "full_name": full_name,
+        }
 
-    for child in results:
-        if child.get("type") == "child_database":
-            db_title = child["child_database"]["title"]
-            if db_title == TARGET_TITLE:
-                return child["id"]
-
-    raise Exception(f"❌ No database found under parent page with title: {TARGET_TITLE}")
+    return course_map
 
 
-def get_db_schema(database_id):
-    """
-    n8n: "Read Old DB Schema"
-    """
-    url = f"https://api.notion.com/v1/databases/{database_id}"
-    resp = requests.get(url, headers=notion_headers())
+def get_canvas_assignments_for_course(course_id):
+    headers = {"Authorization": f"Bearer {CANVAS_API_TOKEN}"}
+    url = f"{CANVAS_BASE_URL}/api/v1/courses/{course_id}/assignments?per_page=100"
+
+    print(f"   🔎 Fetching assignments for course {course_id}…")
+    resp = requests.get(url, headers=headers)
     resp.raise_for_status()
     return resp.json()
 
 
-def _clean_descriptions(obj):
+def get_all_assignments(course_map):
     """
-    n8n: JS in "Prepare New DB JSON"
-
-    Recursively remove empty/null 'description' fields.
+    Return list of (course_id, assignment_dict).
     """
-    if isinstance(obj, list):
-        return [_clean_descriptions(x) for x in obj]
-
-    if isinstance(obj, dict):
-        new_obj = {}
-        for k, v in obj.items():
-            if k == "description" and (v is None or v == "" or v == []):
-                # drop it
-                continue
-            new_obj[k] = _clean_descriptions(v)
-        return new_obj
-
-    return obj
+    all_items = []
+    for cid in course_map.keys():
+        assignments = get_canvas_assignments_for_course(cid)
+        print(f"   📄 {len(assignments)} assignments in course {cid}.")
+        for a in assignments:
+            all_items.append((cid, a))
+    print(f"📚 Total assignments collected: {len(all_items)}")
+    return all_items
 
 
-def build_new_db_payload(schema):
+# ==============================
+# NOTION – DATABASE CREATION
+# ==============================
+def archive_existing_database():
     """
-    Build a POST /v1/databases payload using the old schema,
-    like n8n "Prepare New DB JSON".
+    Find any child_database under NOTION_PARENT_PAGE_ID with title == NOTION_DB_TITLE
+    and archive them (n8n: Archive-if-Exists).
     """
-    require_env("NOTION_PARENT_PAGE_ID", NOTION_PARENT_PAGE_ID)
+    headers = get_notion_headers()
+    url = f"https://api.notion.com/v1/blocks/{NOTION_PARENT_PAGE_ID}/children?page_size=100"
 
-    cleaned = _clean_descriptions(schema)
+    print("🗃️  Looking for existing Notion databases to archive…")
+    has_more = True
+    next_cursor = None
+    archived_count = 0
 
-    # Title is an array of rich-text; reuse as-is.
-    title = cleaned.get("title", [])
+    while has_more:
+        params = {}
+        if next_cursor:
+            params["start_cursor"] = next_cursor
 
-    properties = cleaned.get("properties", {})
+        resp = requests.get(url, headers=headers, params=params)
+        resp.raise_for_status()
+        data = resp.json()
 
-    payload = {
+        for child in data.get("results", []):
+            if child.get("type") == "child_database":
+                db_id = child.get("id")
+                db_title = child["child_database"].get("title", "")
+                if db_title == NOTION_DB_TITLE:
+                    print(f"   🧹 Archiving old database: {db_title} ({db_id})")
+                    patch_url = f"https://api.notion.com/v1/databases/{db_id}"
+                    patch_body = {"archived": True}
+                    r2 = requests.patch(patch_url, headers=headers, data=json.dumps(patch_body))
+                    r2.raise_for_status()
+                    archived_count += 1
+
+        has_more = data.get("has_more", False)
+        next_cursor = data.get("next_cursor")
+
+    if archived_count == 0:
+        print("ℹ️  No existing database with that name found. Fresh create.")
+    else:
+        print(f"✅ Archived {archived_count} old database(s) named '{NOTION_DB_TITLE}'.")
+
+
+def build_db_properties_schema():
+    """
+    Fixed, simple schema (Option A). This matches the core columns you had:
+      - Assignment Name (Title)
+      - Course (short ID/code)
+      - Course Name (full)
+      - Due Date
+      - Status (Pending / Completed)
+      - Canvas URL
+      - Canvas ID
+      - Max Points
+      - Submitted
+      - Synced On
+    """
+    return {
+        "Assignment Name": {"title": {}},
+        "Course": {"rich_text": {}},
+        "Course Name": {"rich_text": {}},
+        "Due Date": {"date": {}},
+        "Status": {
+            "select": {
+                "options": [
+                    {"name": "Pending", "color": "yellow"},
+                    {"name": "Completed", "color": "green"},
+                ]
+            }
+        },
+        "Canvas URL": {"url": {}},
+        "Canvas ID": {"rich_text": {}},
+        "Max Points": {"number": {"format": "number"}},
+        "Submitted": {"checkbox": {}},
+        "Synced On": {"date": {}},
+    }
+
+
+def create_new_database():
+    """
+    Create a new database under NOTION_PARENT_PAGE_ID with fixed schema
+    and title 'Canvas Course - Track Assignments'.
+    """
+    headers = get_notion_headers()
+    url = "https://api.notion.com/v1/databases"
+
+    body = {
         "parent": {
             "type": "page_id",
             "page_id": NOTION_PARENT_PAGE_ID,
         },
-        "title": title,
-        "properties": properties,
+        "title": [
+            {
+                "type": "text",
+                "text": {"content": NOTION_DB_TITLE},
+            }
+        ],
+        "properties": build_db_properties_schema(),
     }
-    return payload
 
-
-def create_new_database(payload):
-    """
-    n8n: "Create New Database"
-    """
-    url = "https://api.notion.com/v1/databases"
-    resp = requests.post(url, headers=notion_headers(), data=json.dumps(payload))
+    print("🆕 Creating new Notion database…")
+    resp = requests.post(url, headers=headers, data=json.dumps(body))
     resp.raise_for_status()
-    return resp.json()
+    db = resp.json()
+    db_id = db["id"]
+    print(f"✅ Created database '{NOTION_DB_TITLE}' with id {db_id}")
+    return db_id
 
 
-def archive_database(database_id):
-    """
-    n8n: "Archive Old Database"
-    PATCH /v1/databases/{id} { "archived": true }
-    """
-    url = f"https://api.notion.com/v1/databases/{database_id}"
-    body = {"archived": True}
-    resp = requests.patch(url, headers=notion_headers(), data=json.dumps(body))
-    resp.raise_for_status()
-    return resp.json()
+# ==============================
+# NOTION – PAGE CREATION
+# ==============================
+def create_assignment_page(db_id, course_info, assignment):
+    headers = get_notion_headers()
 
+    assignment_name = assignment.get("name") or "Untitled Assignment"
+    canvas_url = assignment.get("html_url")
+    canvas_id = str(assignment.get("id"))
+    due_at = assignment.get("due_at")
+    points = assignment.get("points_possible")
+    has_submitted = assignment.get("has_submitted_submissions", False)
 
-# ==========================================================
-# CANVAS – courses & assignments
-# ==========================================================
-
-def get_canvas_courses():
-    """
-    n8n: "Get Canvas Courses"
-
-    Logic:
-      - If CANVAS_COURSE_IDS is set: fetch ONLY those course IDs.
-      - Else: fetch all "active/available" courses for the token user.
-    """
-    require_env("CANVAS_API_TOKEN", CANVAS_API_TOKEN)
-
-    courses = []
-
-    if CANVAS_COURSE_IDS:
-        print(f"▶ Using CANVAS_COURSE_IDS filter from environment: {CANVAS_COURSE_IDS}")
-        for cid in CANVAS_COURSE_IDS:
-            url = f"{CANVAS_BASE_URL}/api/v1/courses/{cid}"
-            r = requests.get(url, headers=canvas_headers())
-            r.raise_for_status()
-            course = r.json()
-            # Only keep "available" or "active" style courses
-            if course.get("workflow_state") in ("available", "active"):
-                courses.append(course)
-        return courses
-
-    print("▶ No CANVAS_COURSE_IDS set – loading all active Canvas courses…")
-    url = f"{CANVAS_BASE_URL}/api/v1/courses"
-    params = {
-        "include[]": "term",
-        "state[]": "available",  # closest to n8n "current" behaviour
-    }
-
-    while url:
-        r = requests.get(url, headers=canvas_headers(), params=params)
-        r.raise_for_status()
-        batch = r.json()
-        for c in batch:
-            if c.get("workflow_state") in ("available", "active"):
-                courses.append(c)
-
-        # Pagination via Link header
-        next_url = None
-        links = r.headers.get("Link", "")
-        for part in links.split(","):
-            if 'rel="next"' in part:
-                next_url = part[part.find("<") + 1 : part.find(">")]
-                break
-        url = next_url
-        params = None  # only include params on first page
-
-    return courses
-
-
-def get_canvas_assignments(course_id):
-    """
-    n8n: "Get Canvas Assignments"
-    """
-    url = f"{CANVAS_BASE_URL}/api/v1/courses/{course_id}/assignments"
-    params = {
-        "include[]": ["submission"],
-    }
-
-    assignments = []
-    while url:
-        r = requests.get(url, headers=canvas_headers(), params=params)
-        r.raise_for_status()
-        assignments.extend(r.json())
-
-        links = r.headers.get("Link", "")
-        next_url = None
-        for part in links.split(","):
-            if 'rel="next"' in part:
-                next_url = part[part.find("<") + 1 : part.find(">")]
-                break
-        url = next_url
-        params = None
-
-    return assignments
-
-
-def filter_assignments(assignments, now_utc):
-    """
-    n8n: "Filter Assignments" (approximate)
-
-    Keep:
-      - assignments that have a due_at
-      - due date within the next 7 days (or today) AND not extremely old.
-    """
-    window_days = 7
-    filtered = []
-
-    for a in assignments:
-        due_at = a.get("due_at")
-        if not due_at:
-            continue
-
+    # Convert due_at ISO -> date
+    due_date_prop = None
+    if due_at:
         try:
-            due = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+            due_date_prop = dt.date().isoformat()
         except Exception:
-            continue
+            pass
 
-        diff = due - now_utc
-        if -window_days <= diff.days <= window_days:
-            filtered.append(a)
+    now = datetime.now(timezone.utc).date().isoformat()
 
-    return filtered
-
-
-def determine_status(assignment, now_utc):
-    """
-    Approximation of your n8n "Transform Data" status logic.
-
-    Uses:
-      - submission (if present)
-      - due date vs now
-    """
-    due_at = assignment.get("due_at")
-    submission = assignment.get("submission") or {}
-    submitted_at = submission.get("submitted_at")
-    graded_at = submission.get("graded_at")
-    late = submission.get("late", False)
-
-    # If submitted
-    if submitted_at or graded_at or submission.get("workflow_state") in (
-        "graded",
-        "submitted",
-    ):
-        return "Completed"
-
-    if not due_at:
-        return "Pending"
-
-    due = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
-    if due < now_utc:
-        return "Overdue" if late else "Missing"
-
-    return "Pending"
-
-
-def create_notion_page_for_assignment(db_id, course, assignment, now_utc):
-    """
-    n8n: "Create Notion Page"
-    """
-    course_name = course.get("name", f"Course {course.get('id')}")
-    due_at = assignment.get("due_at")
-
-    notion_properties = {
+    properties = {
         "Assignment Name": {
             "title": [
-                {"text": {"content": assignment.get("name", "Untitled assignment")}}
+                {"text": {"content": assignment_name}}
             ]
         },
         "Course": {
             "rich_text": [
-                {"text": {"content": course_name}},
+                {"text": {"content": course_info["short_name"]}}
             ]
+        },
+        "Course Name": {
+            "rich_text": [
+                {"text": {"content": course_info["full_name"]}}
+            ]
+        },
+        "Status": {
+            "select": {"name": "Pending"}
+        },
+        "Canvas URL": {
+            "url": canvas_url,
+        },
+        "Canvas ID": {
+            "rich_text": [
+                {"text": {"content": canvas_id}}
+            ]
+        },
+        "Submitted": {
+            "checkbox": bool(has_submitted),
+        },
+        "Synced On": {
+            "date": {"start": now},
         },
     }
 
-    if due_at:
-        due = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
-        notion_properties["Due Date"] = {
-            "date": {"start": due.astimezone(timezone.utc).isoformat()}
+    if points is not None:
+        properties["Max Points"] = {
+            "number": float(points),
         }
 
-    status = determine_status(assignment, now_utc)
-    notion_properties["Status"] = {"select": {"name": status}}
+    if due_date_prop:
+        properties["Due Date"] = {
+            "date": {"start": due_date_prop}
+        }
 
-    payload = {
+    body = {
         "parent": {"database_id": db_id},
-        "properties": notion_properties,
+        "properties": properties,
     }
 
     url = "https://api.notion.com/v1/pages"
-    resp = requests.post(url, headers=notion_headers(), data=json.dumps(payload))
+    resp = requests.post(url, headers=headers, data=json.dumps(body))
     resp.raise_for_status()
 
 
-# ==========================================================
-# MAIN – orchestrate whole flow
-# ==========================================================
+def sync_assignments_to_notion(db_id, course_map, assignments):
+    print("📝 Creating pages in Notion…")
+    count = 0
+    for cid, assignment in assignments:
+        course_info = course_map.get(cid)
+        if not course_info:
+            # Should not happen, but be safe
+            continue
+        create_assignment_page(db_id, course_info, assignment)
+        count += 1
 
+    print(f"✅ Created {count} assignment pages in Notion.")
+
+
+# ==============================
+# MAIN
+# ==============================
 def main():
-    require_env("NOTION_API_KEY", NOTION_API_KEY)
-    require_env("NOTION_PARENT_PAGE_ID", NOTION_PARENT_PAGE_ID)
-    require_env("CANVAS_API_TOKEN", CANVAS_API_TOKEN)
+    ensure_env()
 
-    print("▶ Connecting to Notion…")
+    # 1) Canvas: get courses (active) + filter by CANVAS_COURSE_IDS if provided
+    course_map = get_canvas_courses()
+    if not course_map:
+        print("⚠️ No courses found (after filtering). Nothing to sync.")
+        return
 
-    # 1) Find current DB under parent page
-    old_db_id = get_latest_db_id()
-    print(f"   Current database id: {old_db_id}")
+    # 2) Canvas: get all assignments for those courses
+    assignments = get_all_assignments(course_map)
+    if not assignments:
+        print("⚠️ No assignments found. Nothing to sync.")
+        return
 
-    # 2) Read its schema
-    old_schema = get_db_schema(old_db_id)
+    # 3) Notion: archive old DB (same name) and create new DB under same parent page
+    archive_existing_database()
+    new_db_id = create_new_database()
 
-    # 3) Prepare payload for new DB
-    new_db_payload = build_new_db_payload(old_schema)
+    # 4) Notion: create pages for all assignments
+    sync_assignments_to_notion(new_db_id, course_map, assignments)
 
-    # 4) Create new DB (same title, same schema)
-    new_db = create_new_database(new_db_payload)
-    new_db_id = new_db["id"]
-    print(f"   Created new database id: {new_db_id}")
-
-    # 5) Archive old DB
-    archive_database(old_db_id)
-    print("   Archived old database.")
-
-    # 6) Canvas: get courses
-    print("▶ Fetching Canvas courses…")
-    courses = get_canvas_courses()
-    print(f"   Found {len(courses)} candidate courses.")
-
-    now_utc = datetime.now(timezone.utc)
-
-    # 7) For each course, get assignments, filter, and write to Notion
-    for course in courses:
-        cid = course.get("id")
-        print(f"▶ Processing Canvas course {cid} ({course.get('name')})…")
-
-        assignments = get_canvas_assignments(cid)
-        filtered = filter_assignments(assignments, now_utc)
-        print(f"   Found {len(filtered)} assignments in 7-day window.")
-
-        for a in filtered:
-            create_notion_page_for_assignment(new_db_id, course, a, now_utc)
-
-    print("✅ Sync complete.")
+    print("🎉 Canvas → Notion sync completed.")
 
 
 if __name__ == "__main__":
