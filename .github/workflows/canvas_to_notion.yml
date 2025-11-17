@@ -1,50 +1,38 @@
-name: Canvas → Notion (Assignments Sync with Due-Date Filter)
+name: Canvas → Notion (Assignments Sync)
 
 on:
   schedule:
-    # Every Monday 14:00 UTC = 6:00 PM Dubai (UTC+4)
-    - cron: "0 14 * * 1"
+    - cron: "0 14 * * 1"   # Monday 6PM Dubai time (UTC+4)
   workflow_dispatch:
 
 jobs:
-  canvas-to-notion:
+  sync:
     runs-on: ubuntu-latest
 
     env:
-      # Canvas
       CANVAS_BASE_URL: https://dwight.instructure.com
       CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
-      # Repository variable (string like "7229,7243") – can be empty
       CANVAS_COURSE_IDS: ${{ vars.CANVAS_COURSE_IDS }}
 
-      # Notion
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-      # Same parent page ID you used in n8n (store as repository variable)
       NOTION_PARENT_PAGE_ID: ${{ vars.NOTION_PARENT_PAGE_ID }}
-      # Optional – database title; or leave blank to use default
-      NOTION_DATABASE_NAME: ${{ vars.NOTION_DATABASE_NAME }}
 
-      # Due-date filter window (repository variables – strings)
-      # e.g. "2025-11-20", "2025-11-30" or "" if unused
       DUE_DATE_PERIOD_START: ${{ vars.DUE_DATE_PERIOD_START }}
       DUE_DATE_PERIOD_END: ${{ vars.DUE_DATE_PERIOD_END }}
-      # "true" / "false" (string) – repository variable
       INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE: ${{ vars.INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE }}
 
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
-          python -m pip install --upgrade pip
-          pip install requests
+          pip install requests beautifulsoup4
 
-      - name: Run Canvas → Notion sync
-        run: |
-          python canvas_to_notion.py
+      - name: Run sync
+        run: python canvas_to_notion.py
