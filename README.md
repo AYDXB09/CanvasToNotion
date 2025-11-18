@@ -1,160 +1,191 @@
-Canvas to Notion Sync (Python Script)
-A powerful Python script to automatically synchronize your assignments and course data from Canvas LMS directly into a Notion database. Stay organized and keep all your academic tasks in one place without manual entry.
+# Canvas → Notion Automation  
+Automatically sync all your Canvas assignments into a freshly-created Notion database every week.
 
-This script fetches assignments from your Canvas courses, intelligently determines their status (e.g., "Not Started", "In Progress", "Completed", "Overdue"), formats the data, and then creates or updates corresponding entries in a structured Notion database.
+This project connects:
 
-✨ Features
-Automated Syncing: Run the script to keep your Notion database up-to-date with Canvas.
+- **Canvas LMS** → pulls all active courses + their assignments  
+- **Notion** → recreates a clean database on every run  
+- **GitHub Actions** → runs the sync automatically every Monday evening  
+- Supports **optional due-date filtering**, **HTML-cleaned descriptions**, and **fixed legacy schema** identical to the n8n workflow.
 
-Intelligent Status Tracking: Automatically assigns a status to each assignment based on submission status and due dates.
+---
 
-Handles Multiple Courses: Processes assignments from all Canvas courses specified in your configuration.
+# 📌 Features
 
-Secure Credential Management: Uses environment variables to keep your API keys and tokens safe and out of the codebase.
+### ✅ 1. Automatically fetches Canvas assignments  
+- Reads all **active courses** for the authenticated student  
+- Optional: manually restrict course IDs using `CANVAS_COURSE_IDS`  
+- Pulls:
+  - Assignment name  
+  - Due date  
+  - Description (HTML → clean text, no `<tags>`, no `&nbsp;`)  
+  - Updated date  
+  - Submission status  
+  - Points possible  
+  - Score (if any)  
 
-Easy to Customize: Built with Python, making it simple to modify and extend.
+---
 
-🚀 Getting Started
-Follow these steps to get the script running on your local machine.
+### ✅ 2. Fully recreates Notion database every run  
+- Archives any existing database named **“Canvas Course - Track Assignments”** under the parent page  
+- Creates a fresh database under your chosen Notion page  
+- Uses **Legacy Schema A** (the long version used in your n8n workflow), including:
 
-Prerequisites
+| Field Name | Type |
+|------------|------|
+| Name | Title |
+| Assignment Updated Date | Date |
+| Class | Text |
+| Description | Text |
+| Due Date | Date |
+| ID | Text |
+| Link | URL |
+| Points | Number |
+| Score | Number |
+| Status | Select (Overdue / In Progress / Completed / Not Started) |
+| Submitted Date | Date |
 
-Python 3.8+ installed on your machine.
+---
 
-pip (Python package installer).
+### ✅ 3. Optional Due-Date Filtering  
+Uses two repository variables:
 
-Git for cloning the repository.
+| Variable | Purpose |
+|---------|----------|
+| `DUE_DATE_PERIOD_START` | Include assignments due after this date |
+| `DUE_DATE_PERIOD_END` | Include assignments due before this date |
+| `INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE` | `"true"` or `"false"` |
 
-Canvas LMS Account: You'll need an Access Token.
+Filter logic:
 
-Notion Account: You'll need a Notion API key and a database.
+1. If **both start & end** are provided → include between  
+2. If **only end** is provided → include before end  
+3. If **only start** is provided → include after start  
+4. If neither provided → include all  
+5. If assignment has **no due date** → include only if `INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE=true`
 
-1. Set Up Your Notion Database
+---
 
-Create a Notion Database: If you don't have one, create a new database in Notion for your assignments.
+### ✅ 4. Clean & HTML-free descriptions  
+The script removes:
 
-Add Database Properties: Your database must have properties that correspond to the data you want to sync. Here is a recommended schema:
+- `<p>`, `<strong>`, `<em>`, etc.  
+- Inline HTML links  
+- Canvas’s `&nbsp;` entities  
 
-Property Name
+So your Notion database stays clean and readable.
 
-Type
+---
 
-Purpose
+### ✅ 5. Weekly Scheduler (GitHub Actions)  
+Runs automatically:
 
-Name
+> **Every Monday – 6:00 PM Dubai Time (14:00 UTC)**
 
-Title
+You also have **Run workflow manually** support.
 
-The name of the assignment.
+---
 
-Class
+# 📁 Project Structure
 
-Select
+📦 repository
+├── canvas_to_notion.py        → Main script
+└── .github/workflows/
+└── canvas_to_notion.yml → Scheduler + automation
 
-The name of the course.
+---
 
-Due Date
+# 🔧 Setup Instructions
 
-Date
+Follow these steps **exactly** after cloning the repository.
 
-The assignment's due date.
+---
 
-Status
+## 1️⃣ Create the required *Secrets*
 
-Select
+Open:
 
-e.g., Not Started, In Progress, Overdue, Completed
+**GitHub → Repository → Settings → Secrets and variables → Actions → New repository secret**
 
-Link
+Create these secrets:
 
-URL
+| Secret Name | Value |
+|-------------|--------|
+| `CANVAS_API_TOKEN` | Your Canvas API token |
+| `NOTION_API_KEY` | Your Notion internal integration token |
+| `NOTION_PARENT_PAGE_ID` | Page ID where the DB will be created |
+| `EMAIL_RECIPIENTS` | Comma-separated list: `yalama@gmail.com, anvithy09@gmail.com` |
 
-A direct link to the assignment on Canvas.
+---
 
-Canvas ID
+## 2️⃣ Create the required *Variables*
 
-Text
+Go to:
 
-The unique ID from Canvas for syncing.
+**Settings → Secrets and variables → Actions → Variables**
 
-Points Possible
+Add:
 
-Number
+| Variable Name | Example Value | Purpose |
+|---------------|---------------|---------|
+| `CANVAS_COURSE_IDS` | `7229,7243` | Optional course filtering |
+| `NOTION_DATABASE_NAME` | `Canvas Course - Track Assignments` | Name of DB to create |
+| `DUE_DATE_PERIOD_START` | `2025-11-20` | Optional filter |
+| `DUE_DATE_PERIOD_END` | `2025-11-30` | Optional filter |
+| `INCLUDE_ASSIGNMENTS_WITHOUT_DUE_DATE` | `true` | Include/exclude assignments without due dates |
 
-The total points for the assignment.
+You may leave date variables blank or default them to `" "`.
 
-Score Obtained
+---
 
-Number
+# ▶️ Running the Sync Manually
 
-Your score after grading.
+Go to:
 
-Get Your Notion API Key & Database ID:
+**GitHub → Actions → Canvas → Notion (Assignments Sync) → Run workflow**
 
-Go to https://www.notion.so/my-integrations.
+---
 
-Create a new integration to get your Internal Integration Token. This is your NOTION_API_KEY.
+# 🔄 Automated Weekly Scheduler
 
-Go to your Notion database, click the ... menu, and select "Add connections". Select the integration you just created.
+Runs automatically **every Monday at 6 PM Dubai**.
 
-Find your Database ID in the URL of your Notion page. It's the long string of characters between your workspace name and the ?v=. This is your NOTION_DATABASE_ID.
+The workflow:
 
-2. Get Your Canvas Access Token
+1. Checks out repository  
+2. Installs Python  
+3. Runs `canvas_to_notion.py`  
+4. Emails success/failure to recipients (coming from `EMAIL_RECIPIENTS` secret)
 
-Log in to Canvas.
+---
 
-Go to Account -> Settings.
+# 📤 Email Notifications
+After each scheduled run, an email is sent to:
 
-Scroll down to Approved Integrations and click "+ New Access Token".
+- **yalama@gmail.com**
+- **anvithy09@gmail.com**
 
-Give it a purpose (e.g., "Notion Sync Script") and generate the token.
+Recipients are stored safely in the `EMAIL_RECIPIENTS` secret.
 
-Copy this token immediately. You won't be able to see it again. This is your CANVAS_API_TOKEN.
+---
 
-3. Installation & Configuration
+# 🛡️ Security Notes
 
-Clone the repository:
+- No OAuth needed.  
+- All API tokens stored in GitHub Secrets.  
+- Notion database is recreated from scratch every time → consistent & clean.  
+- Descriptions sanitized to avoid Notion corruption.
 
-git clone [https://github.com/AYDXB09/CanvasToNotion.git](https://github.com/AYDXB09/CanvasToNotion.git)
-cd CanvasToNotion
+---
 
-Create a virtual environment (recommended):
+# 🧪 How to Test Changes (Best Practice)
 
-python -m venv venv
-source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
+1. Create a branch such as `feature/due-date-filter`  
+2. Push your changes  
+3. Run workflow manually for the branch  
+4. Validate Notion database  
+5. Merge into `main`
 
-Install the required packages:
+---
 
-pip install -r requirements.txt
-
-Configure your credentials:
-
-This project uses a .env file to manage your secret keys.
-
-Make a copy of the example file:
-
-cp .env.example .env
-
-Open the newly created .env file with a text editor and fill in your actual credentials that you collected in the steps above.
-
-4. Run the Script
-
-Once everything is installed and configured, you can run the sync script from your terminal:
-
-python your_main_script_name.py
-
-(Please replace your_main_script_name.py with the actual name of your main Python file.)
-
-The script will now fetch data from Canvas and populate your Notion database.
-
-🔧 Customization
-Change Course IDs: Update the CANVAS_COURSE_IDS variable in your .env file with a comma-separated list of the course IDs you want to sync.
-
-Modify Logic: Feel free to edit the Python script to change how statuses are determined or what data gets synced.
-
-🤝 Contributing
-Contributions, issues, and feature requests are welcome! Feel free to check the issues page.
-
-📝 License
-This project is open-source and available under the MIT License.
-
+# 🚀 That's it!
