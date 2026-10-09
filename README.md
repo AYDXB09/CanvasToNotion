@@ -7,7 +7,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 > [!NOTE]
-> **Status as of 2026-10-09:** the code works (27 offline tests, last real scheduled run succeeded on 2026-01-19), but **the weekly schedule is currently paused.** GitHub automatically disables scheduled workflows in a repository with no activity for 60 days. To resume it, open the **Actions** tab and click **Enable workflow**.
+> The code is covered by 27 offline tests, and the last real scheduled run in this repository's history succeeded (2026-01-19). **GitHub automatically disables scheduled workflows in a repository with no activity for 60 days** — if the Actions tab shows this workflow as disabled, click **Enable workflow** to resume the weekly sync.
 
 A small automation for a student who tracks homework in Notion: every Monday it reads **all your active Canvas courses and their assignments** and rebuilds a clean Notion database with one row per assignment — name, class, due date, points, score, a link back to Canvas, and a status that says what you still need to do. It runs for free on GitHub Actions, with no server.
 
