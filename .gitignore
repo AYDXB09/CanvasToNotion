@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Never commit credentials -- they belong in GitHub Actions secrets/variables
+.env
+.env.*
+*.local
+
+# macOS
+.DS_Store
