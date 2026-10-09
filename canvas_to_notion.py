@@ -70,27 +70,29 @@ DUE_END_DT = parse_filter_date(DUE_DATE_PERIOD_END)
 
 
 def status_from_canvas(assignment, submission):
-    """Reproduce EXACT n8n Transform logic."""
-    sub_state = submission.get("workflow_state") if submission else None
-    due_at = assignment.get("due_at")
-    due_dt = parse_canvas_date(due_at)
-    now = datetime.now(timezone.utc)
+    """Map Canvas's own record of *this student's* submission to a Notion status.
 
-    status = "Not Started"
+    Completed    - submitted, graded or pending review
+    Overdue      - not submitted and the due date has passed
+    Not Started  - not submitted, due date still ahead (or none)
+    In Progress  - only when the submission lookup failed and the due date is ahead
 
-    if sub_state in ["graded", "submitted", "pending_review"]:
-        status = "Completed"
-    elif assignment.get("has_submitted_submissions"):
-        status = "Completed"
-    elif due_dt and due_dt < now:
-        status = "Overdue"
-    elif due_dt:
-        status = "In Progress"
+    The assignment-wide `has_submitted_submissions` flag is deliberately ignored:
+    it means "*any* student has submitted", not "I have".
+    """
+    sub_state = (submission or {}).get("workflow_state")
+    due_dt = parse_canvas_date(assignment.get("due_at"))
+    overdue = bool(due_dt and due_dt < datetime.now(timezone.utc))
 
+    if sub_state in ("graded", "submitted", "pending_review"):
+        return "Completed"
     if sub_state == "unsubmitted":
-        status = "Not Started"
+        return "Overdue" if overdue else "Not Started"
 
-    return status
+    # No usable submission record (the lookup failed): fall back to the due date alone.
+    if overdue:
+        return "Overdue"
+    return "In Progress" if due_dt else "Not Started"
 
 
 # ==============================
