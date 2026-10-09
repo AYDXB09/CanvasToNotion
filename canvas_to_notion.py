@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import re
+from html import unescape
 from datetime import datetime, timezone
 
 # ==============================
@@ -38,12 +39,21 @@ def get_headers():
     }
 
 
-def clean_description(html):
-    """Strip HTML, remove &nbsp; and limit size."""
-    if not html:
+def clean_description(html_text):
+    """Canvas HTML -> plain text for a Notion text field (max 500 characters).
+
+    Block-level tags and <br> become line breaks so paragraphs and list items stay
+    separate; script/style content is dropped; entities (&amp; &eacute; ...) are decoded.
+    """
+    if not html_text:
         return ""
-    text = re.sub(r"<[^>]+>", "", html)          # remove HTML tags
-    text = text.replace("&nbsp;", " ")           # fix your reported &nbsp issue
+    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", "", html_text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</(p|div|li|h[1-6]|tr|blockquote)>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = unescape(text).replace("\u00a0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\s*\n\s*", "\n", text)
     return text.strip()[:500]
 
 

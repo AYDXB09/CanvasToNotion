@@ -63,5 +63,37 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(self.status(None, None), "Not Started")
 
 
+class CleanDescriptionTests(unittest.TestCase):
+    def setUp(self):
+        self.clean = load().clean_description
+
+    def test_paragraphs_do_not_run_together(self):
+        self.assertEqual(self.clean("<p>Read ch1.</p><p>Do Q2.</p>"), "Read ch1.\nDo Q2.")
+
+    def test_line_breaks_and_list_items_are_kept_as_lines(self):
+        self.assertEqual(self.clean("Line one<br>Line two<br/>Line three"), "Line one\nLine two\nLine three")
+        self.assertEqual(self.clean("<ul><li>Alpha</li><li>Beta</li></ul>"), "Alpha\nBeta")
+
+    def test_html_entities_are_decoded(self):
+        self.assertEqual(self.clean("<p>Fish &amp; chips, 5 &lt; 6, &quot;q&quot; &#39;x&#39; caf&eacute;</p>"),
+                         "Fish & chips, 5 < 6, \"q\" 'x' caf\u00e9")
+
+    def test_non_breaking_spaces_become_spaces(self):
+        self.assertEqual(self.clean("a&nbsp;b\u00a0c"), "a b c")
+
+    def test_inline_tags_do_not_add_spaces(self):
+        self.assertEqual(self.clean("<strong>bold</strong>text"), "boldtext")
+
+    def test_script_and_style_content_is_dropped(self):
+        self.assertEqual(self.clean("<script>alert(1)</script>Hi<style>p{color:red}</style>"), "Hi")
+
+    def test_empty_input(self):
+        self.assertEqual(self.clean(None), "")
+        self.assertEqual(self.clean(""), "")
+
+    def test_long_descriptions_are_cut_to_500_characters(self):
+        self.assertEqual(len(self.clean("<p>" + "x" * 900 + "</p>")), 500)
+
+
 if __name__ == "__main__":
     unittest.main()
